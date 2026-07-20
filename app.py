@@ -12,6 +12,13 @@ CATEGORIES = {
     "expense": ["식비", "교통", "문화", "기타"],
 }
 
+OVERSPEND_THRESHOLD = 100_000
+TRAFFIC_KEYWORDS = ("택시", "버스")
+
+
+def contains_traffic_keyword(memo_text):
+    return any(keyword in memo_text for keyword in TRAFFIC_KEYWORDS)
+
 
 def type_value_of(label):
     return "income" if label == "수입" else "expense"
@@ -94,11 +101,29 @@ st.divider()
 # ---------- 내역 추가 ----------
 st.subheader("내역 추가")
 
+alert_amount = st.session_state.pop("overspend_alert_amount", None)
+if alert_amount is not None:
+    st.warning(f"지출 과다 경고! {alert_amount:,.0f}원은 10만원을 초과하는 지출이에요.")
+
+# A widget's session_state value can't be reassigned after that widget has
+# already been instantiated in the current run, so clearing "add_memo" after
+# a successful add (below) can't happen in the same run it's requested in —
+# it has to be deferred to the top of the *next* run, before the widget for
+# that key is created.
+if st.session_state.pop("clear_add_memo", False):
+    st.session_state.add_memo = ""
+
 st.session_state.setdefault("add_type", "지출")
 
 
 def reset_add_category():
     st.session_state.add_category = CATEGORIES[type_value_of(st.session_state.add_type)][0]
+
+
+def on_add_memo_change():
+    if contains_traffic_keyword(st.session_state.get("add_memo", "")):
+        st.session_state.add_type = "지출"
+        st.session_state.add_category = "교통"
 
 
 add_type_label = st.radio(
@@ -109,12 +134,20 @@ add_category_options = CATEGORIES[add_type_value]
 if st.session_state.get("add_category") not in add_category_options:
     st.session_state.add_category = add_category_options[0]
 
+# Outside the form (not inside st.form) so typing "택시"/"버스" here can
+# immediately flip 유형/카테고리 above, instead of waiting for form submit.
+st.text_input(
+    "메모 (선택)",
+    key="add_memo",
+    on_change=on_add_memo_change,
+    help="'택시'나 '버스'가 들어가면 카테고리가 자동으로 '교통'으로 바뀌어요.",
+)
+
 with st.form("add_form", clear_on_submit=True):
     c1, c2 = st.columns(2)
     add_date = c1.date_input("날짜", value=date.today(), key="add_date")
     add_category = c2.selectbox("카테고리", options=add_category_options, key="add_category")
     add_amount = st.number_input("금액", min_value=0, step=1000, value=0, key="add_amount")
-    add_memo = st.text_input("메모 (선택)", key="add_memo")
     submitted = st.form_submit_button("추가", use_container_width=True)
 
 if submitted:
@@ -128,10 +161,13 @@ if submitted:
                 "type": add_type_value,
                 "category": add_category,
                 "amount": int(add_amount),
-                "memo": add_memo.strip(),
+                "memo": st.session_state.get("add_memo", "").strip(),
                 "createdAt": datetime.now().isoformat(),
             }
         )
+        if add_type_value == "expense" and int(add_amount) >= OVERSPEND_THRESHOLD:
+            st.session_state.overspend_alert_amount = int(add_amount)
+        st.session_state.clear_add_memo = True
         st.rerun()
 
 st.divider()
@@ -204,13 +240,27 @@ for t in sorted_transactions:
                     t["category"] if t["category"] in e_category_options else e_category_options[0]
                 )
 
+            def make_on_memo_change(type_key=type_key, cat_key=cat_key, memo_key=memo_key):
+                def _on_change():
+                    if contains_traffic_keyword(st.session_state.get(memo_key, "")):
+                        st.session_state[type_key] = "지출"
+                        st.session_state[cat_key] = "교통"
+
+                return _on_change
+
             e1, e2 = st.columns(2)
             e_date = e1.date_input("날짜", value=date.fromisoformat(t["date"]), key=date_key)
             e_category = e2.selectbox("카테고리", options=e_category_options, key=cat_key)
             e_amount = st.number_input(
                 "금액", min_value=0, step=1000, value=int(t["amount"]), key=amt_key
             )
-            e_memo = st.text_input("메모 (선택)", value=t.get("memo", ""), key=memo_key)
+            e_memo = st.text_input(
+                "메모 (선택)",
+                value=t.get("memo", ""),
+                key=memo_key,
+                on_change=make_on_memo_change(),
+                help="'택시'나 '버스'가 들어가면 카테고리가 자동으로 '교통'으로 바뀌어요.",
+            )
 
             save_col, cancel_col, delete_col = st.columns(3)
             if save_col.button("저장", key=f"save_{t['id']}_{rev}", use_container_width=True):
@@ -227,6 +277,8 @@ for t in sorted_transactions:
                             "memo": e_memo.strip(),
                         },
                     )
+                    if e_type_value == "expense" and int(e_amount) >= OVERSPEND_THRESHOLD:
+                        st.session_state.overspend_alert_amount = int(e_amount)
                     st.session_state.editing_id = None
                     st.rerun()
             if cancel_col.button("취소", key=f"cancel_{t['id']}_{rev}", use_container_width=True):
